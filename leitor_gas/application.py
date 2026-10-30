@@ -37,7 +37,10 @@ from leitor_gas.persistence import (
     save_calibration,
     update_calibration_regions,
 )
-from leitor_gas.calibration_preview import render_calibration_preview
+from leitor_gas.calibration_preview import (
+    render_calibration_preview,
+    suggest_region_coordinates,
+)
 from leitor_gas.cameras import find_cameras
 from leitor_gas.vision import classify_roi, detect_digit_positions, load_classifier
 
@@ -659,7 +662,8 @@ class MeterCard(ctk.CTkFrame):
             editor,
             text=(
                 f"Edite os limites numéricos de cada região "
-                f"({self.calibration['width']} × {self.calibration['height']})."
+                f"({self.calibration['width']} × {self.calibration['height']}). "
+                "A região mais à direita é a parte decimal."
             ),
             anchor="w",
             justify="left",
@@ -677,33 +681,133 @@ class MeterCard(ctk.CTkFrame):
         )
         table = ctk.CTkScrollableFrame(editor)
         table.grid(row=1, column=1, padx=(8, 16), pady=8, sticky="nsew")
-        for column, title in enumerate(("Dígito", "X inicial", "Y inicial", "X final", "Y final")):
-            ctk.CTkLabel(table, text=title, font=ctk.CTkFont(weight="bold")).grid(
-                row=0, column=column, padx=4, pady=5
-            )
-
-        fields = []
-        for row, roi in enumerate(self.calibration["rois"], start=1):
-            ctk.CTkLabel(table, text=str(row)).grid(row=row, column=0, padx=4, pady=3)
-            row_fields = []
-            for column, coordinate in enumerate(("x1", "y1", "x2", "y2"), start=1):
-                entry = ctk.CTkEntry(table, width=88)
-                entry.insert(0, str(int(roi[coordinate])))
-                entry.grid(row=row, column=column, padx=4, pady=3)
-                entry.bind(
-                    "<KeyRelease>",
-                    lambda _event: self._update_calibration_preview(
-                        preview_label, preview_frame, fields
-                    ),
-                )
-                row_fields.append(entry)
-            fields.append(row_fields)
-
         preview_frame = self.frame.copy() if self.frame is not None else None
+        fields = []
+        region_metadata = []
+
+        def update_preview(_event=None):
+            self._update_calibration_preview(preview_label, preview_frame, fields)
+
+        def rebuild_region_rows(regions):
+            fields.clear()
+            region_metadata.clear()
+            for child in table.winfo_children():
+                child.destroy()
+
+            columns = ("Região", "X inicial", "Y inicial", "X final", "Y final")
+            for column, title in enumerate(columns):
+                ctk.CTkLabel(
+                    table, text=title, font=ctk.CTkFont(weight="bold")
+                ).grid(row=0, column=column, padx=4, pady=5)
+
+            for row, roi in enumerate(regions, start=1):
+                region_metadata.append(
+                    {
+                        key: value
+                        for key, value in roi.items()
+                        if key not in {"x1", "y1", "x2", "y2"}
+                    }
+                )
+                ctk.CTkLabel(table, text=str(row)).grid(
+                    row=row, column=0, padx=4, pady=3
+                )
+                row_fields = []
+                for column, coordinate in enumerate(
+                    ("x1", "y1", "x2", "y2"), start=1
+                ):
+                    entry = ctk.CTkEntry(table, width=72)
+                    entry.insert(0, str(int(roi[coordinate])))
+                    entry.grid(row=row, column=column, padx=3, pady=3)
+                    entry.bind("<KeyRelease>", update_preview)
+                    entry.bind("<<Paste>>", update_preview)
+                    row_fields.append(entry)
+                fields.append(row_fields)
+
+                ctk.CTkButton(
+                    table,
+                    text="Remover",
+                    width=62,
+                    height=28,
+                    fg_color="#414752",
+                    hover_color=RED,
+                    command=lambda index=row - 1: remove_region(index),
+                ).grid(row=row, column=5, padx=3, pady=3)
+
+            update_preview()
+
+        def current_regions():
+            return [
+                {
+                    "x1": int(row_fields[0].get()),
+                    "y1": int(row_fields[1].get()),
+                    "x2": int(row_fields[2].get()),
+                    "y2": int(row_fields[3].get()),
+                    **region_metadata[index],
+                }
+                for index, row_fields in enumerate(fields)
+            ]
+
+        def add_region():
+            height = int(self.calibration["height"])
+            width = int(self.calibration["width"])
+            try:
+                regions = current_regions()
+                update_calibration_regions(
+                    self.calibration,
+                    [
+                        (region["x1"], region["y1"], region["x2"], region["y2"])
+                        for region in regions
+                    ],
+                )
+                coordinates = suggest_region_coordinates(
+                    [
+                        (region["x1"], region["y1"], region["x2"], region["y2"])
+                        for region in regions
+                    ],
+                    width,
+                    height,
+                )
+            except ValueError as exc:
+                messagebox.showerror("Regiões inválidas", str(exc), parent=editor)
+                return
+
+            regions.append(
+                {
+                    **dict(zip(("x1", "y1", "x2", "y2"), coordinates)),
+                    "confidence": 0.0,
+                    "name": "manual",
+                }
+            )
+            regions.sort(key=lambda region: (region["x1"] + region["x2"]) / 2)
+            rebuild_region_rows(regions)
+
+        def remove_region(index):
+            if len(fields) <= 1:
+                messagebox.showwarning(
+                    "Regiões dos dígitos",
+                    "Mantenha pelo menos uma região.",
+                    parent=editor,
+                )
+                return
+
+            try:
+                regions = current_regions()
+            except ValueError as exc:
+                messagebox.showerror("Regiões inválidas", str(exc), parent=editor)
+                return
+            del regions[index]
+            rebuild_region_rows(regions)
+
+        rebuild_region_rows(self.calibration["rois"])
         self._update_calibration_preview(preview_label, preview_frame, fields)
 
         buttons = ctk.CTkFrame(editor, fg_color="transparent")
         buttons.grid(row=2, column=0, columnspan=2, padx=12, pady=(4, 12), sticky="e")
+        ctk.CTkButton(
+            buttons,
+            text="Adicionar ponto",
+            command=add_region,
+        ).pack(side="left", padx=4)
         ctk.CTkButton(
             buttons,
             text="Cancelar",
@@ -713,7 +817,9 @@ class MeterCard(ctk.CTkFrame):
         ctk.CTkButton(
             buttons,
             text="Salvar regiões",
-            command=lambda: self._save_calibration_edits(fields, editor),
+            command=lambda: self._save_calibration_edits(
+                fields, editor, region_metadata
+            ),
         ).pack(side="right", padx=4)
 
     @staticmethod
@@ -737,13 +843,15 @@ class MeterCard(ctk.CTkFrame):
         preview_label.image_ref = image_ref
         preview_label.configure(image=image_ref, text="")
 
-    def _save_calibration_edits(self, fields: list, editor):
+    def _save_calibration_edits(self, fields: list, editor, region_metadata: list):
         try:
             coordinates = [
                 tuple(int(field.get()) for field in fields_for_roi)
                 for fields_for_roi in fields
             ]
-            data = update_calibration_regions(self.calibration, coordinates)
+            data = update_calibration_regions(
+                self.calibration, coordinates, region_metadata
+            )
             save_calibration(self.calibration_file, data)
         except (ValueError, OSError) as exc:
             messagebox.showerror("Regiões inválidas", str(exc), parent=editor)

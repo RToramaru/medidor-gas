@@ -38,18 +38,29 @@ def save_calibration(path: Path, data: dict):
     temporary_path.replace(path)
 
 
-def update_calibration_regions(data: dict, coordinates: list[tuple[int, int, int, int]]) -> dict:
+def update_calibration_regions(
+    data: dict,
+    coordinates: list[tuple[int, int, int, int]],
+    region_metadata: list[dict] | None = None,
+) -> dict:
     width = int(data["width"])
     height = int(data["height"])
-    if len(coordinates) != len(data["rois"]):
-        raise ValueError("A quantidade de regiões não corresponde à calibração.")
+    if not coordinates:
+        raise ValueError("A calibração precisa manter pelo menos uma região.")
+    if region_metadata is not None and len(region_metadata) != len(coordinates):
+        raise ValueError("Os dados das regiões não correspondem às coordenadas.")
 
     rois = []
-    for index, (roi, bounds) in enumerate(zip(data["rois"], coordinates), start=1):
+    for index, bounds in enumerate(coordinates, start=1):
         x1, y1, x2, y2 = bounds
         if not (0 <= x1 < x2 <= width and 0 <= y1 < y2 <= height):
             raise ValueError(f"Os limites do dígito {index} são inválidos.")
-        updated_roi = dict(roi)
+        if region_metadata is not None:
+            updated_roi = dict(region_metadata[index - 1])
+        elif index <= len(data["rois"]):
+            updated_roi = dict(data["rois"][index - 1])
+        else:
+            updated_roi = {"confidence": 0.0, "name": "manual"}
         updated_roi.update({"x1": x1, "y1": y1, "x2": x2, "y2": y2})
         rois.append(updated_roi)
 

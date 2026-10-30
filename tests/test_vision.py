@@ -12,7 +12,10 @@ from leitor_gas.vision import (
     classify_roi,
     detect_digit_positions,
 )
-from leitor_gas.calibration_preview import render_calibration_preview
+from leitor_gas.calibration_preview import (
+    render_calibration_preview,
+    suggest_region_coordinates,
+)
 
 
 class TensorStub:
@@ -79,6 +82,15 @@ class VisionTests(unittest.TestCase):
 
         np.testing.assert_array_equal(frame, original)
         self.assertEqual(preview.getpixel((10, 10)), (57, 255, 145))
+
+    def test_suggested_region_fits_left_of_the_existing_regions(self):
+        coordinates = suggest_region_coordinates(
+            [(30, 10, 50, 40), (60, 10, 80, 40)],
+            width=100,
+            height=60,
+        )
+
+        self.assertEqual(coordinates, (9, 10, 29, 40))
 
     def test_tensor_preparation_resizes_and_returns_batch_dimension(self):
         model = {

@@ -9,7 +9,7 @@ Aplicativo desktop para ler hidrômetros a partir de imagens, vídeos e câmera.
 - Reutiliza a calibração da fonte quando ela já existe.
 - Mantém a imagem principal original, sem sobreposições.
 - Exibe a leitura assim que todos os dígitos forem reconhecidos.
-- Permite selecionar e reconectar câmeras e ajustar regiões com coordenadas.
+- Permite selecionar e reconectar câmeras e ajustar as regiões: editar coordenadas, adicionar pontos ou remover regiões.
 - Mostra os quadros das regiões na prévia do editor e atualiza-os ao alterar as coordenadas.
 - Processa imagens, vídeos e câmera em segundo plano para manter a interface responsiva.
 
@@ -73,7 +73,7 @@ python main.py
 1. Aguarde o carregamento inicial.
 2. Selecione uma imagem, vídeo ou câmera no menu lateral.
 3. Aguarde a leitura inicial. O valor aparece assim que todos os dígitos forem reconhecidos.
-4. Se necessário, clique em **Calibrar novamente** ou em **Ajustar regiões**. A prévia do editor destaca as regiões conforme você altera as coordenadas; a imagem principal continua sem desenhos.
+4. Se necessário, clique em **Calibrar novamente** ou em **Ajustar regiões**. Na prévia, adicione ou remova pontos e veja os quadros mudarem conforme edita as coordenadas. Mantenha pelo menos uma região; a região mais à direita é a parte decimal. A imagem principal continua sem desenhos.
 5. Em vídeos, use **Pausar**. Em câmeras, use **Gravar vídeo** se precisar salvar a captura.
 
 Imagens são analisadas uma vez. A leitura é uma estimativa e deve ser conferida antes de ser usada como registro oficial. Caso uma câmera ou vídeo continue aberto após um erro de leitura, tente calibrar novamente.
@@ -120,7 +120,7 @@ leitor-ocr-gas/
 
 - `main.py` inicia o aplicativo.
 - `leitor_gas/application.py` contém a interface e o ciclo de vida de imagens, vídeos e câmera.
-- `leitor_gas/cameras.py`, `calibration_preview.py` e `persistence.py` cuidam da busca de câmeras, da prévia do ajuste e do armazenamento de calibrações.
+- `leitor_gas/cameras.py`, `calibration_preview.py` e `persistence.py` cuidam da busca de câmeras, da prévia e edição das regiões e do armazenamento de calibrações.
 - `leitor_gas/vision.py` contém a detecção e a classificação dos dígitos.
 - `leitor_gas/settings.py` centraliza caminhos, parâmetros e cores.
 - `build.py` cria o pacote distribuível para o sistema atual.

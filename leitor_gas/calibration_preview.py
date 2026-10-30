@@ -3,6 +3,19 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 
+def suggest_region_coordinates(
+    regions: list[tuple[int, int, int, int]],
+    width: int,
+    height: int,
+) -> tuple[int, int, int, int]:
+    reference = min(regions, key=lambda region: region[0])
+    region_width = min(width, reference[2] - reference[0])
+    region_height = min(height, reference[3] - reference[1])
+    x1 = max(0, reference[0] - region_width - 1)
+    y1 = min(max(0, reference[1]), height - region_height)
+    return x1, y1, x1 + region_width, y1 + region_height
+
+
 def render_calibration_preview(
     frame: np.ndarray,
     regions: list[tuple[int, int, int, int] | None],

@@ -70,6 +70,36 @@ class PersistenceTests(unittest.TestCase):
                 calibration, [(10, 5, 101, 25)]
             )
 
+    def test_editing_calibration_allows_adding_and_removing_regions(self):
+        calibration = {
+            "width": 100,
+            "height": 50,
+            "rois": [
+                {"x1": 10, "y1": 5, "x2": 20, "y2": 25, "name": "0"},
+                {"x1": 30, "y1": 5, "x2": 40, "y2": 25, "name": "1"},
+                {"x1": 50, "y1": 5, "x2": 60, "y2": 25, "name": "2"},
+            ],
+        }
+
+        updated = persistence.update_calibration_regions(
+            calibration,
+            [(5, 5, 15, 25), (30, 5, 40, 25)],
+            [{"name": "manual"}, {"name": "1"}],
+        )
+
+        self.assertEqual(len(updated["rois"]), 2)
+        self.assertEqual([roi["name"] for roi in updated["rois"]], ["manual", "1"])
+
+    def test_editing_calibration_requires_at_least_one_region(self):
+        calibration = {
+            "width": 100,
+            "height": 50,
+            "rois": [{"x1": 10, "y1": 5, "x2": 20, "y2": 25}],
+        }
+
+        with self.assertRaisesRegex(ValueError, "pelo menos uma região"):
+            persistence.update_calibration_regions(calibration, [])
+
     def test_legacy_migration_preserves_source_and_does_not_overwrite(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

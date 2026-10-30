@@ -45,11 +45,12 @@ def load_classifier(path: Path, expected_classes: int) -> dict:
 
 
 def _prepare_tensor(roi: np.ndarray, model: dict) -> np.ndarray:
-    rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
-    image = Image.fromarray(rgb).resize(
+    image = Image.fromarray(roi).resize(
         (model["width"], model["height"]), Image.Resampling.BILINEAR
     )
-    pixels = np.asarray(image, dtype=np.float32)
+    pixels = np.ascontiguousarray(
+        np.asarray(image, dtype=np.float32)[:, :, ::-1]
+    )
     input_details = model["input"]
     input_dtype = input_details["dtype"]
 

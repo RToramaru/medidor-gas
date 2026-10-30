@@ -468,7 +468,7 @@ class MeterCard(ctk.CTkFrame):
         self.last_values = None
         self.initialized_reading = False
         threading.Thread(
-            target=self._image_analysis_worker, args=(frame.copy(),), daemon=True
+            target=self._image_analysis_worker, args=(frame,), daemon=True
         ).start()
 
     def _image_analysis_worker(self, frame: np.ndarray):
@@ -1042,7 +1042,7 @@ class HydrometerApp(ctk.CTk):
     def schedule_latest_frame(self, card: MeterCard, frame: np.ndarray):
         key = ("preview", card.card_id)
         self._schedule_coalesced(
-            key, lambda image=frame.copy(): card._show_frame(image)
+            key, lambda image=frame: card._show_frame(image)
         )
 
     def schedule_latest_analysis(
@@ -1056,7 +1056,7 @@ class HydrometerApp(ctk.CTk):
         key = ("analysis", card.card_id)
         self._schedule_coalesced(
             key,
-            lambda image=frame.copy(), value=reading,
+            lambda image=frame, value=reading,
             is_complete=reading_complete, message=status: card._render_analysis(
                 image, value, is_complete, message
             ),

@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+from PIL import Image
 
 from leitor_gas.vision import (
     _intersection_over_union,
@@ -82,6 +83,27 @@ class VisionTests(unittest.TestCase):
 
         self.assertEqual(tensor.shape, (1, 1, 2, 3))
         self.assertEqual(tensor.dtype, np.uint8)
+
+    def test_tensor_preparation_preserves_the_existing_rgb_pixels(self):
+        model = {
+            "width": 20,
+            "height": 32,
+            "input": {
+                "dtype": np.dtype(np.float32),
+                "quantization": (0.0, 0),
+            },
+        }
+        roi = np.random.default_rng(42).integers(
+            0, 256, (73, 91, 3), dtype=np.uint8
+        )
+        expected = np.asarray(
+            Image.fromarray(roi[:, :, ::-1].copy()).resize(
+                (20, 32), Image.Resampling.BILINEAR
+            ),
+            dtype=np.float32,
+        )[None, ...]
+
+        np.testing.assert_array_equal(_prepare_tensor(roi, model), expected)
 
     def test_classifier_returns_softmax_confidence_for_logits(self):
         interpreter = ClassifierStub([1.0, 3.0, 0.0])

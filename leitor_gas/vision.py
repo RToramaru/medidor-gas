@@ -84,8 +84,17 @@ def classify_roi(roi: np.ndarray, model: dict) -> tuple[int, float]:
         else:
             scores = scores.astype(np.float32)
 
+    scores = scores.astype(np.float32)
     class_index = int(np.argmax(scores))
-    return class_index, float(scores[class_index])
+    if np.all(scores >= 0) and np.all(scores <= 1) and np.isclose(
+        float(scores.sum()), 1.0, atol=0.05
+    ):
+        confidence = float(scores[class_index])
+    else:
+        shifted = scores - scores.max()
+        probabilities = np.exp(shifted)
+        confidence = float(probabilities[class_index] / probabilities.sum())
+    return class_index, confidence
 
 
 def _predict(image: np.ndarray, model_path: Path, device: str | int) -> tuple:

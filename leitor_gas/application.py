@@ -1,26 +1,28 @@
-import csv
+import ctypes
 import hashlib
 import json
 import queue
+import sys
 import threading
+import time
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from queue import Empty
+from queue import Empty, Full, Queue
 import tkinter.filedialog as filedialog
 from tkinter import messagebox
 
 import cv2
 import customtkinter as ctk
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageTk
 
 from leitor_gas.settings import (
+    APP_ICON_PATH,
     BACKGROUND,
     BORDER,
     CALIBRATIONS_DIR,
     DECIMAL_CLASSIFIER,
-    FRAME_INTERVAL_MS,
     GREEN,
     INTEGER_CLASSIFIER,
     MUTED,
@@ -29,6 +31,14 @@ from leitor_gas.settings import (
     RESULTS_DIR,
     TEXT,
 )
+from leitor_gas.persistence import (
+    append_reading,
+    load_calibration,
+    migrate_legacy_results,
+    save_calibration,
+    update_calibration_regions,
+)
+from leitor_gas.cameras import find_cameras
 from leitor_gas.vision import classify_roi, detect_digit_positions, load_classifier
 
 
@@ -66,10 +76,21 @@ class MeterCard(ctk.CTkFrame):
         self.initialized_reading = False
         self.calibrating = False
         self.calibration_attempted = False
+        self.calibration_request_pending = False
+        self.resolution_mismatch = False
         self.reading_error = False
         self.writer = None
         self.recording = False
         self.image_ref = None
+        self.worker_stop = threading.Event()
+        self.recording_lock = threading.Lock()
+        self.analysis_lock = threading.Lock()
+        self.capture_thread = None
+        self.analysis_thread = None
+        self.connecting = False
+        self.source_finished = False
+        self.frame_queue = Queue(maxsize=1)
+        self.source_frame_interval = 0.0
 
         source_key = f"{source_type}:{source}"
         source_hash = hashlib.sha256(source_key.encode("utf-8")).hexdigest()[:16]
@@ -185,6 +206,28 @@ class MeterCard(ctk.CTkFrame):
         )
         self.save_button.grid(row=1, column=1, padx=3, pady=3, sticky="ew")
 
+        self.reconnect_button = ctk.CTkButton(
+            actions,
+            text="Reconectar câmera",
+            height=34,
+            command=self.reconnect_camera,
+            state="disabled",
+        )
+        self.reconnect_button.grid(
+            row=2, column=0, columnspan=2, padx=3, pady=3, sticky="ew"
+        )
+        self.reconnect_button.grid_remove()
+        self.edit_calibration_button = ctk.CTkButton(
+            actions,
+            text="Ajustar regiões",
+            height=34,
+            command=self.open_calibration_editor,
+            state="disabled",
+        )
+        self.edit_calibration_button.grid(
+            row=3, column=0, columnspan=2, padx=3, pady=3, sticky="ew"
+        )
+
         if self.source_type == "image":
             self.pause_button.configure(state="disabled")
             self.record_button.configure(state="disabled")
@@ -206,27 +249,83 @@ class MeterCard(ctk.CTkFrame):
 
             self._show_frame(self.frame)
             if self.calibration is not None:
-                self._process_frame(self.frame, initialize=True)
+                self._start_image_analysis(self.frame)
             else:
                 self.after(250, self.calibrate)
             return
 
-        video_source = 0 if self.source_type == "camera" else str(self.source)
-        try:
-            self.capture = cv2.VideoCapture(video_source)
-        except cv2.error as exc:
-            self._set_status("Não foi possível abrir esta fonte.", error=True)
-            messagebox.showerror("Erro ao abrir fonte", str(exc), parent=self.app)
-            return
-        if not self.capture.isOpened():
-            self.capture.release()
-            self.capture = None
-            self._set_status("Não foi possível abrir esta fonte.", error=True)
-            return
+        if self.source_type == "camera":
+            self.reconnect_button.grid()
+        self._connect_source()
 
+    def _connect_source(self):
+        if (
+            self.closed
+            or self.connecting
+            or self.capture_thread is not None and self.capture_thread.is_alive()
+            or self.analysis_thread is not None and self.analysis_thread.is_alive()
+        ):
+            return
+        self.connecting = True
+        self.worker_stop.clear()
+        self._set_status("Conectando à fonte…")
+        threading.Thread(target=self._connect_source_worker, daemon=True).start()
+
+    def _connect_source_worker(self):
+        video_source = self.source if self.source_type == "camera" else str(self.source)
+        try:
+            capture = cv2.VideoCapture(video_source)
+            if not capture.isOpened():
+                capture.release()
+                raise RuntimeError("Não foi possível abrir esta fonte.")
+        except Exception as exc:
+            self.app.schedule_ui(lambda error=exc: self._source_connection_failed(error))
+            return
+        self.app.schedule_ui(lambda: self._source_connected(capture))
+
+    def _source_connected(self, capture):
+        self.connecting = False
+        if self.closed:
+            capture.release()
+            return
+        self.capture = capture
         self.running = True
+        self.source_finished = False
+        self.frame_queue = Queue(maxsize=1)
+        if self.source_type == "video":
+            fps = capture.get(cv2.CAP_PROP_FPS)
+            self.source_frame_interval = 1.0 / fps if 1 <= fps <= 120 else 1 / 30
+        else:
+            self.source_frame_interval = 0.0
+        if self.source_type == "camera":
+            with self.analysis_lock:
+                self.last_values = None
+                self.initialized_reading = False
+                self.last_reading = "—"
+            self.reading_label.configure(text="—")
+            self.save_button.configure(state="disabled")
+        self.reconnect_button.grid_remove()
         self._set_status("Ao vivo", color=GREEN)
-        self.after(30, self._next_frame)
+        self.capture_thread = threading.Thread(target=self._capture_worker, daemon=True)
+        self.capture_thread.start()
+        self.analysis_thread = threading.Thread(target=self._stream_worker, daemon=True)
+        self.analysis_thread.start()
+
+    def _source_connection_failed(self, error: Exception):
+        self.connecting = False
+        if self.closed:
+            return
+        self.running = False
+        self._set_status(str(error), error=True)
+        if self.source_type == "camera":
+            self.reconnect_button.configure(state="normal")
+            self.reconnect_button.grid()
+
+    def reconnect_camera(self):
+        if self.source_type != "camera" or self.running:
+            return
+        self.reconnect_button.configure(state="disabled")
+        self._connect_source()
 
     def _set_status(self, text: str, error: bool = False, color: str | None = None):
         if self.closed:
@@ -240,69 +339,141 @@ class MeterCard(ctk.CTkFrame):
         self.info_label.configure(text=text)
 
     def _load_calibration(self):
-        if not self.calibration_file.is_file():
-            return
-
         try:
-            data = json.loads(self.calibration_file.read_text(encoding="utf-8"))
-            if (
-                not isinstance(data, dict)
-                or int(data["width"]) <= 0
-                or int(data["height"]) <= 0
-                or not isinstance(data["rois"], list)
-                or not data["rois"]
-            ):
-                raise ValueError("O arquivo de calibração está incompleto.")
-
-            for roi in data["rois"]:
-                for coordinate in ("x1", "y1", "x2", "y2"):
-                    float(roi[coordinate])
-
+            data = load_calibration(self.calibration_file)
+            if data is None:
+                return
             self.calibration = data
             self.backend = data.get("backend", "Calibração salva")
-        except (OSError, ValueError, TypeError, KeyError) as exc:
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
             self._set_status(f"Não foi possível carregar a calibração: {exc}", error=True)
 
-    def _next_frame(self):
-        if self.closed or not self.running or self.capture is None:
-            return
-        if self.paused:
-            self.after(100, self._next_frame)
-            return
+    def _stream_worker(self):
+        while not self.worker_stop.is_set():
+            try:
+                frame = self.frame_queue.get(timeout=0.1)
+            except Empty:
+                if self.source_finished or not self.running:
+                    break
+                continue
 
-        ok, frame = self.capture.read()
-        if not ok:
-            if self.source_type == "video":
-                self.running = False
-                self._release_writer()
-                self._set_status("Vídeo finalizado.")
-                return
-            self.after(100, self._next_frame)
-            return
-
-        self.frame = frame
-        if self.calibration is None:
-            self._show_frame(frame)
-            if not self.calibrating and not self.calibration_attempted:
-                self.calibrate()
-        elif self._compatible(frame):
-            if self.reading_error:
-                self._show_frame(frame)
+            if self.worker_stop.is_set():
+                break
+            if self.calibration is None:
+                self._schedule_preview(frame)
+                if (
+                    not self.calibrating
+                    and not self.calibration_attempted
+                    and not self.calibration_request_pending
+                ):
+                    self.calibration_request_pending = True
+                    self.app.schedule_ui(
+                        lambda image=frame.copy(): self._request_calibration(image)
+                    )
+            elif self._compatible(frame):
+                self.resolution_mismatch = False
+                if self.reading_error:
+                    self._schedule_preview(frame)
+                else:
+                    self._process_frame(frame, initialize=not self.initialized_reading)
             else:
-                self._process_frame(frame, initialize=not self.initialized_reading)
-        else:
-            self._show_frame(frame)
-            self._set_status("A resolução mudou. Calibre novamente.")
+                self._schedule_preview(frame)
+                if not self.resolution_mismatch:
+                    self.resolution_mismatch = True
+                    self.app.schedule_latest_status(self, self._resolution_changed)
 
-        if self.recording and self.writer is not None:
+        if self.source_finished and not self.worker_stop.is_set():
+            if self.source_type == "video":
+                self.app.schedule_ui(self._video_finished)
+            else:
+                self.app.schedule_ui(self._camera_disconnected)
+
+    def _capture_worker(self):
+        while self.running and not self.worker_stop.is_set():
+            started_at = time.monotonic()
+            if self.paused:
+                time.sleep(0.05)
+                continue
+            capture = self.capture
+            if capture is None:
+                break
+
+            ok, frame = capture.read()
+            if not ok:
+                self.running = False
+                self.source_finished = True
+                capture.release()
+                self.capture = None
+                break
+
+            self.frame = frame
+            if self.recording:
+                self._write_frame(frame)
+
+            try:
+                self.frame_queue.put_nowait(frame)
+            except Full:
+                try:
+                    self.frame_queue.get_nowait()
+                except Empty:
+                    pass
+                self.frame_queue.put_nowait(frame)
+
+            if self.source_frame_interval:
+                elapsed = time.monotonic() - started_at
+                time.sleep(max(0.0, self.source_frame_interval - elapsed))
+
+    def _video_finished(self):
+        self._release_writer()
+        self._set_status("Vídeo finalizado.")
+
+    def _camera_disconnected(self):
+        self._release_writer()
+        self._set_status("Câmera desconectada. Tente reconectar.", error=True)
+        self.reconnect_button.configure(state="normal")
+        self.reconnect_button.grid()
+
+    def _write_frame(self, frame: np.ndarray):
+        error = None
+        with self.recording_lock:
+            if self.writer is None:
+                return
             try:
                 self.writer.write(frame)
             except cv2.error as exc:
-                self._release_writer()
-                self._set_status("A gravação foi interrompida.", error=True)
-                messagebox.showerror("Erro ao gravar", str(exc), parent=self.app)
+                error = exc
+        if error is not None:
+            self.app.schedule_ui(lambda exc=error: self._recording_failed(exc))
 
-        self.after(FRAME_INTERVAL_MS, self._next_frame)
+    def _recording_failed(self, error: Exception):
+        self._release_writer()
+        self._set_status("A gravação foi interrompida.", error=True)
+        messagebox.showerror("Erro ao gravar", str(error), parent=self.app)
+
+    def _resolution_changed(self):
+        self._set_status("A resolução mudou. Ajuste as regiões novamente.", error=True)
+
+    def _schedule_preview(self, frame: np.ndarray):
+        self.app.schedule_latest_frame(self, frame)
+
+    def _request_calibration(self, frame: np.ndarray):
+        self.calibration_request_pending = False
+        if self.closed or self.calibration is not None or self.calibrating:
+            return
+        self.frame = frame
+        self.calibrate()
+
+    def _start_image_analysis(self, frame: np.ndarray):
+        self.reading_error = False
+        self.last_values = None
+        self.initialized_reading = False
+        threading.Thread(
+            target=self._image_analysis_worker, args=(frame.copy(),), daemon=True
+        ).start()
+
+    def _image_analysis_worker(self, frame: np.ndarray):
+        if not self.closed:
+            self._process_frame(frame, initialize=True)
 
     def _compatible(self, frame: np.ndarray) -> bool:
         if self.calibration is None:
@@ -351,10 +522,7 @@ class MeterCard(ctk.CTkFrame):
             }
             if self.closed:
                 return
-            self.calibration_file.parent.mkdir(parents=True, exist_ok=True)
-            self.calibration_file.write_text(
-                json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
-            )
+            save_calibration(self.calibration_file, data)
         except Exception as exc:
             self.app.schedule_ui(lambda error=exc: self._calibration_failed(error))
             return
@@ -367,12 +535,21 @@ class MeterCard(ctk.CTkFrame):
             return
 
         self.calibrate_button.configure(state="normal")
-        self.calibration = data
-        self.backend = data["backend"]
-        self.last_values = None
-        self.initialized_reading = False
-        self.reading_error = False
-        self._process_frame(self.frame, initialize=True)
+        with self.analysis_lock:
+            self.calibration = data
+            self.backend = data["backend"]
+            self.last_values = None
+            self.initialized_reading = False
+            self.reading_error = False
+        self.edit_calibration_button.configure(state="normal")
+        self.last_reading = "—"
+        self.reading_label.configure(text="—")
+        self.save_button.configure(state="disabled")
+        self.edit_calibration_button.configure(state="normal")
+        if self.source_type == "image" and self.frame is not None:
+            self._start_image_analysis(self.frame)
+        else:
+            self._set_status("Regiões localizadas. Iniciando leitura…")
 
     def _calibration_failed(self, error: Exception):
         self.calibrating = False
@@ -385,19 +562,16 @@ class MeterCard(ctk.CTkFrame):
 
     def _process_frame(self, frame: np.ndarray, initialize: bool = False):
         try:
-            self._process_frame_impl(frame, initialize)
+            with self.analysis_lock, self.app.inference_lock:
+                self._analyze_frame(frame, initialize)
         except Exception as exc:
             self.reading_error = True
-            self._release_writer()
-            self._set_status("Não foi possível processar esta imagem.", error=True)
-            messagebox.showerror("Erro na leitura", str(exc), parent=self.app)
+            self.app.schedule_ui(lambda error=exc: self._analysis_failed(error))
 
-    def _process_frame_impl(self, frame: np.ndarray, initialize: bool = False):
-        if not self.calibration or not self.app.model11 or not self.app.model100:
-            self._show_frame(frame)
+    def _analyze_frame(self, frame: np.ndarray, initialize: bool = False):
+        if self.closed or not self.calibration or not self.app.model11 or not self.app.model100:
             return
         if not self._compatible(frame):
-            self._show_frame(frame)
             return
 
         height, width = frame.shape[:2]
@@ -408,10 +582,12 @@ class MeterCard(ctk.CTkFrame):
         last_roi = rois[-1]
         x1, y1, x2, y2 = self._clip_roi(last_roi, width, height)
         if x2 <= x1 or y2 <= y1:
-            self._show_frame(frame)
+            self.app.schedule_latest_analysis(
+                self, frame, "—", False, "Aguardando uma leitura completa."
+            )
             return
 
-        last_class, last_score = classify_roi(
+        last_class, _ = classify_roi(
             frame[y1:y2, x1:x2], self.app.model100
         )
         last_value = round(last_class / 10.0, 1)
@@ -419,7 +595,6 @@ class MeterCard(ctk.CTkFrame):
             "kind": "decimal",
             "class": last_class,
             "value": last_value,
-            "score": last_score,
         }
 
         update_integer_digits = initialize or last_value < 1.0
@@ -428,7 +603,7 @@ class MeterCard(ctk.CTkFrame):
                 x1, y1, x2, y2 = self._clip_roi(roi, width, height)
                 if x2 <= x1 or y2 <= y1:
                     continue
-                class_index, score = classify_roi(
+                class_index, _ = classify_roi(
                     frame[y1:y2, x1:x2], self.app.model11
                 )
                 value = None if class_index == 10 else class_index
@@ -436,61 +611,137 @@ class MeterCard(ctk.CTkFrame):
                     "kind": "integer",
                     "class": class_index,
                     "value": value,
-                    "score": score,
                 }
-
-        annotated = frame.copy()
-        for roi, value in zip(rois, self.last_values):
-            x1, y1, x2, y2 = self._clip_roi(roi, width, height)
-            if value is None:
-                label, color = "?", (0, 180, 255)
-            elif value["value"] is None:
-                label, color = "N", (0, 180, 255)
-            elif value["kind"] == "decimal":
-                label, color = f"{value['value']:.1f}", (50, 220, 100)
-            else:
-                label, color = str(value["value"]), (50, 220, 100)
-
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(
-                annotated,
-                label,
-                (x1, max(20, y1 - 7)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.65,
-                color,
-                2,
-                cv2.LINE_AA,
-            )
 
         reading_is_complete = all(
             value is not None and value["value"] is not None
             for value in self.last_values
         )
+        reading = "—"
         if reading_is_complete:
             integer_part = "".join(
                 str(value["value"]) for value in self.last_values[:-1]
             )
-            self.last_reading = (
-                integer_part + f"{self.last_values[-1]['value']:.1f}"
-            )
-            self.reading_label.configure(text=self.last_reading)
-            self.save_button.configure(state="normal")
-        else:
-            self.last_reading = "—"
-            self.reading_label.configure(text=self.last_reading)
-            self.save_button.configure(state="disabled")
+            reading = integer_part + f"{self.last_values[-1]['value']:.1f}"
 
-        self._show_frame(annotated)
+        self.last_reading = reading
         if initialize:
             status = "Leitura inicial concluída."
         elif update_integer_digits:
             status = "Leitura atualizada."
         else:
             status = "Acompanhando o último dígito."
-        self._set_status(status, color=GREEN)
         if initialize:
             self.initialized_reading = True
+        self.app.schedule_latest_analysis(
+            self,
+            frame,
+            self.last_reading,
+            reading_is_complete,
+            status,
+        )
+
+    def _analysis_failed(self, error: Exception):
+        if self.closed:
+            return
+        self._release_writer()
+        self.save_button.configure(state="disabled")
+        self._set_status("Não foi possível processar esta imagem.", error=True)
+        messagebox.showerror("Erro na leitura", str(error), parent=self.app)
+
+    def open_calibration_editor(self):
+        if not self.calibration:
+            return
+
+        editor = ctk.CTkToplevel(self.app)
+        editor.title("Ajustar regiões dos dígitos")
+        editor.geometry("620x520")
+        editor.transient(self.app)
+        editor.grab_set()
+        editor.grid_columnconfigure(0, weight=1)
+        editor.grid_rowconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            editor,
+            text=(
+                f"Edite os limites numéricos de cada região "
+                f"({self.calibration['width']} × {self.calibration['height']})."
+            ),
+            anchor="w",
+            justify="left",
+        ).grid(row=0, column=0, padx=16, pady=(16, 8), sticky="ew")
+
+        table = ctk.CTkScrollableFrame(editor)
+        table.grid(row=1, column=0, padx=12, pady=8, sticky="nsew")
+        for column, title in enumerate(("Dígito", "X inicial", "Y inicial", "X final", "Y final")):
+            ctk.CTkLabel(table, text=title, font=ctk.CTkFont(weight="bold")).grid(
+                row=0, column=column, padx=4, pady=5
+            )
+
+        fields = []
+        for row, roi in enumerate(self.calibration["rois"], start=1):
+            ctk.CTkLabel(table, text=str(row)).grid(row=row, column=0, padx=4, pady=3)
+            row_fields = []
+            for column, coordinate in enumerate(("x1", "y1", "x2", "y2"), start=1):
+                entry = ctk.CTkEntry(table, width=88)
+                entry.insert(0, str(int(roi[coordinate])))
+                entry.grid(row=row, column=column, padx=4, pady=3)
+                row_fields.append(entry)
+            fields.append(row_fields)
+
+        buttons = ctk.CTkFrame(editor, fg_color="transparent")
+        buttons.grid(row=2, column=0, padx=12, pady=(4, 12), sticky="e")
+        ctk.CTkButton(
+            buttons,
+            text="Cancelar",
+            fg_color="#414752",
+            command=editor.destroy,
+        ).pack(side="right", padx=4)
+        ctk.CTkButton(
+            buttons,
+            text="Salvar regiões",
+            command=lambda: self._save_calibration_edits(fields, editor),
+        ).pack(side="right", padx=4)
+
+    def _save_calibration_edits(self, fields: list, editor):
+        try:
+            coordinates = [
+                tuple(int(field.get()) for field in fields_for_roi)
+                for fields_for_roi in fields
+            ]
+            data = update_calibration_regions(self.calibration, coordinates)
+            save_calibration(self.calibration_file, data)
+        except (ValueError, OSError) as exc:
+            messagebox.showerror("Regiões inválidas", str(exc), parent=editor)
+            return
+
+        with self.analysis_lock:
+            self.calibration = data
+            self.last_values = None
+            self.reading_label.configure(text="—")
+            self.last_reading = "—"
+            self.save_button.configure(state="disabled")
+        self._set_status("Regiões salvas. Lendo novamente…")
+        editor.destroy()
+        if self.source_type == "image" and self.frame is not None:
+            self._start_image_analysis(self.frame)
+
+    def _render_analysis(
+        self,
+        frame: np.ndarray,
+        reading: str,
+        reading_complete: bool,
+        status: str,
+    ):
+        if self.closed:
+            return
+        self.last_reading = reading
+        self.reading_label.configure(text=self.last_reading)
+        self.save_button.configure(
+            state="normal" if reading_complete else "disabled"
+        )
+        self._show_frame(frame)
+        self._set_status(status, color=GREEN)
 
     @staticmethod
     def _clip_roi(box: dict, width: int, height: int) -> tuple[int, int, int, int]:
@@ -551,10 +802,7 @@ class MeterCard(ctk.CTkFrame):
                     fps = source_fps
 
             writer = cv2.VideoWriter(
-                str(output_path),
-                cv2.VideoWriter_fourcc(*"mp4v"),
-                fps,
-                (width, height),
+                str(output_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height)
             )
         except (OSError, cv2.error) as exc:
             messagebox.showerror("Erro ao gravar", str(exc), parent=self.app)
@@ -568,16 +816,18 @@ class MeterCard(ctk.CTkFrame):
             )
             return
 
-        self.writer = writer
-        self.recording = True
+        with self.recording_lock:
+            self.writer = writer
+            self.recording = True
         self.record_button.configure(text="Parar gravação", fg_color=RED)
         self.info_label.configure(text=f"Gravando: {output_path.name}")
 
     def _release_writer(self):
-        if self.writer is not None:
-            self.writer.release()
-            self.writer = None
-        self.recording = False
+        with self.recording_lock:
+            if self.writer is not None:
+                self.writer.release()
+                self.writer = None
+            self.recording = False
         if not self.closed:
             self.record_button.configure(text="Gravar vídeo", fg_color="#B64B35")
 
@@ -586,24 +836,17 @@ class MeterCard(ctk.CTkFrame):
             return
 
         try:
-            RESULTS_DIR.mkdir(parents=True, exist_ok=True)
             output_path = RESULTS_DIR / "leituras.csv"
-            is_new_file = not output_path.exists()
-            with output_path.open("a", newline="", encoding="utf-8-sig") as file:
-                writer = csv.writer(file, delimiter=";")
-                if is_new_file:
-                    writer.writerow(
-                        ["data_hora", "fonte", "leitura", "backend", "rois"]
-                    )
-                writer.writerow(
-                    [
-                        datetime.now().isoformat(timespec="seconds"),
-                        self.title_text,
-                        self.last_reading,
-                        self.backend,
-                        len(self.calibration["rois"]),
-                    ]
-                )
+            append_reading(
+                output_path,
+                [
+                    datetime.now().isoformat(timespec="seconds"),
+                    self.title_text,
+                    self.last_reading,
+                    self.backend,
+                    len(self.calibration["rois"]),
+                ],
+            )
         except OSError as exc:
             messagebox.showerror(
                 "Erro ao salvar leitura", str(exc), parent=self.app
@@ -617,6 +860,7 @@ class MeterCard(ctk.CTkFrame):
             return
         self.closed = True
         self.running = False
+        self.worker_stop.set()
         self._release_writer()
         if self.capture is not None:
             self.capture.release()
@@ -626,8 +870,19 @@ class MeterCard(ctk.CTkFrame):
 
 class HydrometerApp(ctk.CTk):
     def __init__(self):
+        if sys.platform == "win32":
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "LeitorGas.Desktop"
+            )
         super().__init__()
         self.title("Leitor de hidrômetros")
+        if sys.platform == "win32":
+            self.iconbitmap(str(APP_ICON_PATH))
+        with Image.open(APP_ICON_PATH) as icon:
+            icon.load()
+            icon.thumbnail((64, 64))
+            self._icon_image = ImageTk.PhotoImage(icon.copy())
+        self.iconphoto(True, self._icon_image)
         self.geometry("1380x900")
         self.minsize(1000, 680)
         self.configure(fg_color=BACKGROUND)
@@ -639,6 +894,11 @@ class HydrometerApp(ctk.CTk):
         self.closing = False
         self.source_buttons = []
         self.worker_callbacks = queue.Queue()
+        self.inference_lock = threading.Lock()
+        self.pending_ui_lock = threading.Lock()
+        self.pending_ui_callbacks = {}
+        self.queued_ui_keys = set()
+        self.migration_error = migrate_legacy_results()
 
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -779,12 +1039,53 @@ class HydrometerApp(ctk.CTk):
     def schedule_ui(self, callback: Callable[[], None]):
         self.worker_callbacks.put(callback)
 
+    def schedule_latest_frame(self, card: MeterCard, frame: np.ndarray):
+        key = ("preview", card.card_id)
+        self._schedule_coalesced(
+            key, lambda image=frame.copy(): card._show_frame(image)
+        )
+
+    def schedule_latest_analysis(
+        self,
+        card: MeterCard,
+        frame: np.ndarray,
+        reading: str,
+        reading_complete: bool,
+        status: str,
+    ):
+        key = ("analysis", card.card_id)
+        self._schedule_coalesced(
+            key,
+            lambda image=frame.copy(), value=reading,
+            is_complete=reading_complete, message=status: card._render_analysis(
+                image, value, is_complete, message
+            ),
+        )
+
+    def schedule_latest_status(self, card: MeterCard, callback: Callable[[], None]):
+        self._schedule_coalesced(("status", card.card_id), callback)
+
+    def _schedule_coalesced(self, key: tuple, callback: Callable[[], None]):
+        with self.pending_ui_lock:
+            self.pending_ui_callbacks[key] = callback
+            if key not in self.queued_ui_keys:
+                self.queued_ui_keys.add(key)
+                self.worker_callbacks.put(key)
+
     def _poll_worker_callbacks(self):
         while True:
             try:
-                callback = self.worker_callbacks.get_nowait()
+                item = self.worker_callbacks.get_nowait()
             except Empty:
                 break
+            if callable(item):
+                callback = item
+            else:
+                with self.pending_ui_lock:
+                    self.queued_ui_keys.discard(item)
+                    callback = self.pending_ui_callbacks.pop(item, None)
+            if callback is None:
+                continue
             callback()
         if not self.closing:
             self.after(50, self._poll_worker_callbacks)
@@ -800,6 +1101,12 @@ class HydrometerApp(ctk.CTk):
         self.footer_status.configure(
             text="Leitor pronto. Escolha uma imagem, vídeo ou câmera."
         )
+        if self.migration_error:
+            messagebox.showwarning(
+                "Dados antigos",
+                self.migration_error,
+                parent=self,
+            )
 
     def _models_failed(self, error: Exception):
         if self.closing:
@@ -857,7 +1164,79 @@ class HydrometerApp(ctk.CTk):
             self._add_card(path, "image", Path(path).name)
 
     def add_camera(self):
-        self._add_card(0, "camera", "Câmera local")
+        window = ctk.CTkToplevel(self)
+        window.title("Selecionar câmera")
+        window.geometry("390x210")
+        window.transient(self)
+        window.grab_set()
+        window.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            window,
+            text="Selecione uma câmera disponível",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        ).grid(row=0, column=0, padx=18, pady=(18, 8), sticky="w")
+        status = ctk.CTkLabel(
+            window, text="Procurando câmeras…", text_color=MUTED, anchor="w"
+        )
+        status.grid(row=1, column=0, padx=18, pady=5, sticky="ew")
+        camera_list = ctk.CTkComboBox(window, values=[], state="disabled")
+        camera_list.grid(row=2, column=0, padx=18, pady=5, sticky="ew")
+        actions = ctk.CTkFrame(window, fg_color="transparent")
+        actions.grid(row=3, column=0, padx=14, pady=12, sticky="e")
+        ctk.CTkButton(
+            actions,
+            text="Procurar novamente",
+            fg_color="#414752",
+            command=lambda: self._scan_cameras(window, status, camera_list),
+        ).pack(side="left", padx=4)
+        ctk.CTkButton(
+            actions,
+            text="Abrir câmera",
+            command=lambda: self._open_selected_camera(
+                window, camera_list, status
+            ),
+        ).pack(side="left", padx=4)
+        self._scan_cameras(window, status, camera_list)
+
+    def _scan_cameras(self, window, status, camera_list):
+        if not window.winfo_exists():
+            return
+        status.configure(text="Procurando câmeras…")
+        camera_list.configure(values=[], state="disabled")
+        threading.Thread(
+            target=self._scan_cameras_worker,
+            args=(window, status, camera_list),
+            daemon=True,
+        ).start()
+
+    def _scan_cameras_worker(self, window, status, camera_list):
+        available = find_cameras()
+        self.schedule_ui(
+            lambda: self._cameras_found(window, status, camera_list, available)
+        )
+
+    @staticmethod
+    def _cameras_found(window, status, camera_list, available: list[int]):
+        if not window.winfo_exists():
+            return
+        if not available:
+            status.configure(text="Nenhuma câmera encontrada.")
+            camera_list.configure(values=[], state="disabled")
+            return
+        values = [f"Câmera {index}" for index in available]
+        camera_list.configure(values=values, state="readonly")
+        camera_list.set(values[0])
+        status.configure(text=f"{len(values)} câmera(s) disponível(is).")
+
+    def _open_selected_camera(self, window, camera_list, status):
+        selection = camera_list.get()
+        if not selection.startswith("Câmera "):
+            status.configure(text="Selecione uma câmera disponível.")
+            return
+        index = int(selection.removeprefix("Câmera "))
+        window.destroy()
+        self._add_card(index, "camera", selection)
 
     def remove_card(self, card: MeterCard):
         if card in self.cards:

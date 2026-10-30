@@ -1,11 +1,14 @@
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
 
 from leitor_gas.vision import (
     _intersection_over_union,
+    _prepare_tensor,
     _remove_overlaps,
+    classify_roi,
     detect_digit_positions,
 )
 
@@ -38,7 +41,73 @@ class DetectorResultStub:
         self.boxes = boxes
 
 
+class ClassifierStub:
+    def __init__(self, scores):
+        self.scores = np.asarray([scores], dtype=np.float32)
+        self.tensor = None
+
+    def set_tensor(self, index, tensor):
+        self.tensor = tensor
+
+    def invoke(self):
+        return None
+
+    def get_tensor(self, index):
+        return self.scores
+
+
 class VisionTests(unittest.TestCase):
+    def test_preview_pipeline_does_not_draw_annotations(self):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "leitor_gas"
+            / "application.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("cv2.rectangle", source)
+        self.assertNotIn("cv2.putText", source)
+
+    def test_tensor_preparation_resizes_and_returns_batch_dimension(self):
+        model = {
+            "width": 2,
+            "height": 1,
+            "input": {
+                "dtype": np.dtype(np.uint8),
+                "quantization": (0.0, 0),
+            },
+        }
+        roi = np.zeros((2, 4, 3), dtype=np.uint8)
+
+        tensor = _prepare_tensor(roi, model)
+
+        self.assertEqual(tensor.shape, (1, 1, 2, 3))
+        self.assertEqual(tensor.dtype, np.uint8)
+
+    def test_classifier_returns_softmax_confidence_for_logits(self):
+        interpreter = ClassifierStub([1.0, 3.0, 0.0])
+        model = {
+            "interpreter": interpreter,
+            "input": {
+                "index": 0,
+                "dtype": np.dtype(np.uint8),
+                "quantization": (0.0, 0),
+            },
+            "output": {
+                "index": 0,
+                "quantization": (0.0, 0),
+            },
+            "height": 2,
+            "width": 2,
+        }
+
+        class_index, confidence = classify_roi(
+            np.zeros((4, 4, 3), dtype=np.uint8), model
+        )
+
+        self.assertEqual(class_index, 1)
+        self.assertAlmostEqual(confidence, 0.8438, places=3)
+        self.assertEqual(interpreter.tensor.shape, (1, 2, 2, 3))
+
     def test_intersection_over_union_for_identical_boxes(self):
         box = {"x1": 1, "y1": 2, "x2": 11, "y2": 12}
 

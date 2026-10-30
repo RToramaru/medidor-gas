@@ -4,10 +4,11 @@ Aplicativo desktop para ler hidrômetros a partir de imagens, vídeos e câmera.
 
 ## Recursos
 
-- Abrir imagem, vídeo ou câmera local.
-- Calibrar automaticamente e refazer a calibração quando necessário.
-- Pausar fontes de vídeo e câmera.
-- Salvar leituras em CSV e gravar vídeos em MP4.
+- Detecta e reconhece os dígitos do visor.
+- Salva leituras em CSV e grava vídeos em MP4.
+- Reutiliza a calibração da fonte quando ela já existe.
+
+O programa usa detecção YOLO para encontrar os dígitos e classificadores TFLite para ler os valores. A aceleração por GPU é opcional; também é possível executar em CPU.
 
 ## Requisitos
 
@@ -16,9 +17,7 @@ Aplicativo desktop para ler hidrômetros a partir de imagens, vídeos e câmera.
 - Dependências Python do arquivo [`requirements.txt`](requirements.txt).
 - Arquivos de modelos incluídos na pasta [`modelos`](modelos).
 
-O código usa caminhos relativos e não depende de comandos exclusivos de um sistema operacional. Pode ser executado em Windows, macOS e Linux, desde que a versão do Python e as dependências estejam disponíveis para o sistema e processador. No Linux, instale também o pacote Tkinter da sua distribuição (por exemplo, `python3-tk` no Debian/Ubuntu). A câmera pode exigir permissão do sistema.
-
-Não é necessária uma placa de vídeo; a leitura também pode ser processada pela CPU.
+Pode ser executado em Windows, macOS e Linux, desde que Python, Tkinter e as dependências estejam disponíveis para o sistema e o processador. No Linux, pode ser necessário instalar o Tkinter pelo gerenciador de pacotes (por exemplo, `python3-tk` no Debian/Ubuntu). A câmera pode exigir permissão do sistema.
 
 ## Clonar
 
@@ -66,12 +65,12 @@ python main.py
 
 ## Usar
 
-1. Aguarde o aplicativo ficar pronto.
-2. Selecione **Abrir vídeo**, **Abrir imagem** ou **Câmera local**.
-3. Aguarde a leitura inicial. Use **Calibrar** se os dígitos não forem identificados corretamente.
-4. Em vídeos e câmera, use **Pausar** e **Gravar** conforme necessário. **Salvar leitura** acrescenta o valor atual ao histórico.
+1. Aguarde o carregamento inicial.
+2. Selecione uma imagem, vídeo ou câmera no menu lateral.
+3. Aguarde a leitura inicial; se necessário, clique em **Calibrar novamente**.
+4. Em vídeo e câmera, use **Pausar** e **Gravar vídeo**. **Salvar leitura** acrescenta o valor atual ao histórico.
 
-Imagens são analisadas uma vez. A leitura é uma estimativa e deve ser conferida antes de ser usada como registro oficial.
+Imagens são analisadas uma vez. A leitura é uma estimativa e deve ser conferida antes de ser usada como registro oficial. Caso uma câmera ou vídeo continue aberto após um erro de leitura, tente calibrar novamente.
 
 ## Arquivos gerados
 
@@ -81,11 +80,40 @@ O aplicativo cria `resultados/` na pasta do projeto:
 - `calibracoes/`: calibrações reutilizadas ao abrir a mesma fonte novamente.
 - `video_*.mp4`: gravações feitas pelo aplicativo.
 
-Mantenha a pasta `modelos/` e seu conteúdo junto ao programa. O repositório precisa incluir também a pasta `stage1_meter_window_digits_openvino_model` completa.
+Mantenha a pasta `modelos/` e seu conteúdo junto ao programa. Os arquivos de calibração existentes são mantidos em `resultados/calibracoes/`.
+
+## Organização
+
+```text
+leitor-ocr-gas/
+├── main.py
+├── leitor_gas/
+│   ├── application.py
+│   ├── settings.py
+│   └── vision.py
+├── modelos/
+├── requirements.txt
+├── resultados/  # criado automaticamente; ignorado pelo Git
+└── tests/
+```
+
+- `main.py` inicia o aplicativo.
+- `leitor_gas/application.py` contém a interface e o ciclo de vida de imagens, vídeos e câmera.
+- `leitor_gas/vision.py` contém a detecção e a classificação dos dígitos.
+- `leitor_gas/settings.py` centraliza caminhos, limiares e cores.
+
+## Testes
+
+Execute os testes automatizados com:
+
+```shell
+python -m unittest discover -s tests -v
+```
 
 ## Problemas comuns
 
 - **O aplicativo não inicia:** confira a instalação das dependências e se Tkinter está disponível no Python usado.
+- **Erro ao carregar os modelos:** verifique se os arquivos de `modelos/` estão presentes.
 - **Leitura incorreta:** verifique se o visor está nítido e clique em **Calibrar**.
 - **Câmera indisponível:** confira a conexão, as permissões do sistema e se outro aplicativo está usando a câmera.
 - **Leitura lenta:** o processamento pode usar CPU e ficar mais lento em vídeos de alta resolução.

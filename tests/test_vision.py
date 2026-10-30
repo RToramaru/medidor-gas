@@ -1,14 +1,18 @@
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
 from PIL import Image
+import torch
 
+from leitor_gas import vision
 from leitor_gas.vision import (
     _intersection_over_union,
     _prepare_tensor,
     _remove_overlaps,
+    _run_detector,
     classify_roi,
     detect_digit_positions,
 )
@@ -91,6 +95,53 @@ class VisionTests(unittest.TestCase):
         )
 
         self.assertEqual(coordinates, (9, 10, 29, 40))
+
+    def test_suggested_region_can_start_without_existing_regions(self):
+        coordinates = suggest_region_coordinates([], width=100, height=60)
+
+        self.assertEqual(coordinates, (47, 21, 52, 39))
+
+    def test_detector_uses_registered_openvino_cpu_device(self):
+        frame = np.zeros((32, 32, 3), dtype=np.uint8)
+        openvino_model = Path(__file__).resolve().parent
+        runtime = SimpleNamespace(
+            Core=lambda: SimpleNamespace(available_devices=["CPU"])
+        )
+
+        with (
+            patch.dict("sys.modules", {"openvino": runtime}),
+            patch.object(vision, "OPENVINO_MODEL", openvino_model),
+            patch("torch.cuda.is_available", return_value=False),
+            patch.object(
+                vision, "_predict", return_value=("detections", "model")
+            ) as predict,
+        ):
+            result = _run_detector(frame)
+
+        self.assertEqual(result, ("detections", "model", "CPU"))
+        predict.assert_called_once_with(frame, openvino_model, "CPU")
+
+    def test_detector_falls_back_to_torch_cpu_without_openvino_cpu(self):
+        frame = np.zeros((32, 32, 3), dtype=np.uint8)
+        openvino_model = Path(__file__).resolve().parent
+        detector_model = Path("detector.pt")
+        runtime = SimpleNamespace(
+            Core=lambda: SimpleNamespace(available_devices=[])
+        )
+
+        with (
+            patch.dict("sys.modules", {"openvino": runtime}),
+            patch.object(vision, "OPENVINO_MODEL", openvino_model),
+            patch.object(vision, "DETECTOR_MODEL", detector_model),
+            patch("torch.cuda.is_available", return_value=False),
+            patch.object(
+                vision, "_predict", return_value=("detections", "model")
+            ) as predict,
+        ):
+            result = _run_detector(frame)
+
+        self.assertEqual(result, ("detections", "model", "CPU"))
+        predict.assert_called_once_with(frame, detector_model, "cpu")
 
     def test_tensor_preparation_resizes_and_returns_batch_dimension(self):
         model = {

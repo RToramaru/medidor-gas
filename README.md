@@ -73,7 +73,7 @@ python main.py
 1. Aguarde o carregamento inicial.
 2. Selecione uma imagem, vídeo ou câmera no menu lateral.
 3. Aguarde a leitura inicial. O valor aparece assim que todos os dígitos forem reconhecidos.
-4. Se necessário, clique em **Calibrar novamente** ou em **Ajustar regiões**. Na prévia, adicione ou remova pontos e veja os quadros mudarem conforme edita as coordenadas. Mantenha pelo menos uma região; a região mais à direita é a parte decimal. A imagem principal continua sem desenhos.
+4. Se necessário, clique em **Calibrar novamente** ou em **Ajustar regiões**. O ajuste manual pode ser aberto sem calibrar antes. Na prévia, adicione ou remova pontos e veja os quadros mudarem conforme edita as coordenadas. Mantenha pelo menos uma região; a região mais à direita é a parte decimal. A imagem principal continua sem desenhos.
 5. Em vídeos, use **Pausar**. Em câmeras, use **Gravar vídeo** se precisar salvar a captura.
 
 Imagens são analisadas uma vez. A leitura é uma estimativa e deve ser conferida antes de ser usada como registro oficial. Caso uma câmera ou vídeo continue aberto após um erro de leitura, tente calibrar novamente.
@@ -97,7 +97,7 @@ python -m pip install -r requirements-build.txt
 python build.py
 ```
 
-O build gera um único arquivo, `dist/LeitorHidrometros.exe` no Windows. Ele inclui modelos e bibliotecas, executa um teste de inicialização antes de finalizar e não precisa de uma pasta `_internal` ao lado. Ao iniciar, o PyInstaller extrai temporariamente os componentes internos para uma pasta do sistema; essa pasta é gerenciada automaticamente. O PyInstaller não gera executáveis de outros sistemas operacionais; faça um build nativo separado para Windows, macOS e Linux.
+O build gera um único arquivo, `dist/LeitorHidrometros.exe` no Windows. Ele inclui modelos e bibliotecas, verifica a extensão NMS do Torchvision e a inferência OpenVINO em CPU durante o teste de inicialização, e não precisa de uma pasta `_internal` ao lado. Ao iniciar, o PyInstaller extrai temporariamente os componentes internos para uma pasta do sistema; essa pasta é gerenciada automaticamente. O PyInstaller não gera executáveis de outros sistemas operacionais; faça um build nativo separado para Windows, macOS e Linux.
 
 ## Organização
 

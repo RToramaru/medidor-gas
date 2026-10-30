@@ -78,6 +78,7 @@ class MeterCard(ctk.CTkFrame):
         self.initialized_reading = False
         self.calibrating = False
         self.calibration_attempted = False
+        self.calibration_generation = 0
         self.calibration_request_pending = False
         self.resolution_mismatch = False
         self.reading_error = False
@@ -489,16 +490,20 @@ class MeterCard(ctk.CTkFrame):
         if self.calibrating:
             return
 
+        self.calibration_generation += 1
+        generation = self.calibration_generation
         self.calibrating = True
         self.calibration_attempted = True
         self.calibrate_button.configure(state="disabled")
         self._set_status("Localizando os dígitos…")
         frame = self.frame.copy()
         threading.Thread(
-            target=self._calibrate_worker, args=(frame,), daemon=True
+            target=self._calibrate_worker,
+            args=(frame, generation),
+            daemon=True,
         ).start()
 
-    def _calibrate_worker(self, frame: np.ndarray):
+    def _calibrate_worker(self, frame: np.ndarray, generation: int):
         try:
             boxes, backend = detect_digit_positions(frame)
             height, width = frame.shape[:2]
@@ -519,18 +524,29 @@ class MeterCard(ctk.CTkFrame):
                 "backend": backend,
                 "rois": rois,
             }
-            if self.closed:
+            if self.closed or generation != self.calibration_generation:
                 return
-            save_calibration(self.calibration_file, data)
         except Exception as exc:
-            self.app.schedule_ui(lambda error=exc: self._calibration_failed(error))
+            self.app.schedule_ui(
+                lambda error=exc: self._calibration_failed(error, generation)
+            )
             return
 
-        self.app.schedule_ui(lambda: self._calibration_finished(data))
+        self.app.schedule_ui(
+            lambda: self._calibration_finished(data, generation)
+        )
 
-    def _calibration_finished(self, data: dict):
+    def _calibration_finished(self, data: dict, generation: int):
+        if generation != self.calibration_generation:
+            return
         self.calibrating = False
         if self.closed:
+            return
+
+        try:
+            save_calibration(self.calibration_file, data)
+        except OSError as exc:
+            self._calibration_failed(exc, generation)
             return
 
         self.calibrate_button.configure(state="normal")
@@ -542,13 +558,14 @@ class MeterCard(ctk.CTkFrame):
         self.edit_calibration_button.configure(state="normal")
         self.last_reading = "—"
         self.reading_label.configure(text="—")
-        self.edit_calibration_button.configure(state="normal")
         if self.source_type == "image" and self.frame is not None:
             self._start_image_analysis(self.frame)
         else:
             self._set_status("Regiões localizadas. Iniciando leitura…")
 
-    def _calibration_failed(self, error: Exception):
+    def _calibration_failed(self, error: Exception, generation: int):
+        if generation != self.calibration_generation:
+            return
         self.calibrating = False
         if self.closed:
             return
@@ -645,8 +662,23 @@ class MeterCard(ctk.CTkFrame):
         messagebox.showerror("Erro na leitura", str(error), parent=self.app)
 
     def open_calibration_editor(self):
-        if not self.calibration:
+        if self.frame is None:
+            self._set_status("Aguarde a primeira imagem da fonte para ajustar as regiões.")
             return
+
+        self.calibration_generation += 1
+        self.calibrating = False
+        self.calibrate_button.configure(state="normal")
+        frame_height, frame_width = self.frame.shape[:2]
+        if self._compatible(self.frame):
+            editor_calibration = self.calibration
+        else:
+            editor_calibration = {
+                "width": frame_width,
+                "height": frame_height,
+                "backend": "Manual",
+                "rois": [],
+            }
 
         editor = ctk.CTkToplevel(self.app)
         editor.title("Ajustar regiões dos dígitos")
@@ -662,7 +694,7 @@ class MeterCard(ctk.CTkFrame):
             editor,
             text=(
                 f"Edite os limites numéricos de cada região "
-                f"({self.calibration['width']} × {self.calibration['height']}). "
+                f"({editor_calibration['width']} × {editor_calibration['height']}). "
                 "A região mais à direita é a parte decimal."
             ),
             anchor="w",
@@ -748,17 +780,23 @@ class MeterCard(ctk.CTkFrame):
             ]
 
         def add_region():
-            height = int(self.calibration["height"])
-            width = int(self.calibration["width"])
+            height = int(editor_calibration["height"])
+            width = int(editor_calibration["width"])
             try:
                 regions = current_regions()
-                update_calibration_regions(
-                    self.calibration,
-                    [
-                        (region["x1"], region["y1"], region["x2"], region["y2"])
-                        for region in regions
-                    ],
-                )
+                if regions:
+                    update_calibration_regions(
+                        editor_calibration,
+                        [
+                            (
+                                region["x1"],
+                                region["y1"],
+                                region["x2"],
+                                region["y2"],
+                            )
+                            for region in regions
+                        ],
+                    )
                 coordinates = suggest_region_coordinates(
                     [
                         (region["x1"], region["y1"], region["x2"], region["y2"])
@@ -798,7 +836,7 @@ class MeterCard(ctk.CTkFrame):
             del regions[index]
             rebuild_region_rows(regions)
 
-        rebuild_region_rows(self.calibration["rois"])
+        rebuild_region_rows(editor_calibration["rois"])
         self._update_calibration_preview(preview_label, preview_frame, fields)
 
         buttons = ctk.CTkFrame(editor, fg_color="transparent")
@@ -818,7 +856,7 @@ class MeterCard(ctk.CTkFrame):
             buttons,
             text="Salvar regiões",
             command=lambda: self._save_calibration_edits(
-                fields, editor, region_metadata
+                fields, editor, region_metadata, editor_calibration
             ),
         ).pack(side="right", padx=4)
 
@@ -843,14 +881,20 @@ class MeterCard(ctk.CTkFrame):
         preview_label.image_ref = image_ref
         preview_label.configure(image=image_ref, text="")
 
-    def _save_calibration_edits(self, fields: list, editor, region_metadata: list):
+    def _save_calibration_edits(
+        self,
+        fields: list,
+        editor,
+        region_metadata: list,
+        editor_calibration: dict,
+    ):
         try:
             coordinates = [
                 tuple(int(field.get()) for field in fields_for_roi)
                 for fields_for_roi in fields
             ]
             data = update_calibration_regions(
-                self.calibration, coordinates, region_metadata
+                editor_calibration, coordinates, region_metadata
             )
             save_calibration(self.calibration_file, data)
         except (ValueError, OSError) as exc:
@@ -860,6 +904,7 @@ class MeterCard(ctk.CTkFrame):
         with self.analysis_lock:
             self.calibration = data
             self.last_values = None
+            self.initialized_reading = False
             self.reading_label.configure(text="—")
             self.last_reading = "—"
         self._set_status("Regiões salvas. Lendo novamente…")
@@ -891,6 +936,7 @@ class MeterCard(ctk.CTkFrame):
     def _show_frame(self, frame: np.ndarray):
         if self.closed or frame is None:
             return
+        self.edit_calibration_button.configure(state="normal")
 
         height, width = frame.shape[:2]
         scale = min(540 / width, 300 / height)

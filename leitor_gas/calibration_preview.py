@@ -8,6 +8,13 @@ def suggest_region_coordinates(
     width: int,
     height: int,
 ) -> tuple[int, int, int, int]:
+    if not regions:
+        region_width = max(1, round(width * 0.05))
+        region_height = max(1, round(height * 0.3))
+        x1 = (width - region_width) // 2
+        y1 = (height - region_height) // 2
+        return x1, y1, x1 + region_width, y1 + region_height
+
     reference = min(regions, key=lambda region: region[0])
     region_width = min(width, reference[2] - reference[0])
     region_height = min(height, reference[3] - reference[1])

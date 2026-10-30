@@ -142,24 +142,27 @@ def _run_detector(image: np.ndarray) -> tuple:
         errors.append(f"GPU NVIDIA indisponível: {exc}")
 
     if OPENVINO_MODEL.is_dir():
+        devices = []
         try:
             import openvino as ov
 
             devices = ov.Core().available_devices
-            if any(str(device).upper().startswith("GPU") for device in devices):
-                try:
-                    result, model = _predict(image, OPENVINO_MODEL, "intel:gpu")
-                    return result, model, "GPU Intel"
-                except Exception as exc:
-                    errors.append(f"GPU Intel: {exc}")
         except Exception as exc:
             errors.append(f"OpenVINO indisponível: {exc}")
 
-        try:
-            result, model = _predict(image, OPENVINO_MODEL, "intel:cpu")
-            return result, model, "CPU"
-        except Exception as exc:
-            errors.append(f"CPU: {exc}")
+        if any(str(device).upper().startswith("GPU") for device in devices):
+            try:
+                result, model = _predict(image, OPENVINO_MODEL, "intel:gpu")
+                return result, model, "GPU Intel"
+            except Exception as exc:
+                errors.append(f"GPU Intel: {exc}")
+
+        if any(str(device).upper() == "CPU" for device in devices):
+            try:
+                result, model = _predict(image, OPENVINO_MODEL, "CPU")
+                return result, model, "CPU"
+            except Exception as exc:
+                errors.append(f"OpenVINO CPU: {exc}")
 
     try:
         result, model = _predict(image, DETECTOR_MODEL, "cpu")

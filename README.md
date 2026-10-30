@@ -97,7 +97,7 @@ python -m pip install -r requirements-build.txt
 python build.py
 ```
 
-O pacote fica em `dist/LeitorHidrometros/`. O PyInstaller não gera executáveis de outros sistemas operacionais; faça um build nativo separado para Windows, macOS e Linux.
+O build gera um único arquivo, `dist/LeitorHidrometros.exe` no Windows. Ele inclui modelos e bibliotecas, executa um teste de inicialização antes de finalizar e não precisa de uma pasta `_internal` ao lado. Ao iniciar, o PyInstaller extrai temporariamente os componentes internos para uma pasta do sistema; essa pasta é gerenciada automaticamente. O PyInstaller não gera executáveis de outros sistemas operacionais; faça um build nativo separado para Windows, macOS e Linux.
 
 ## Organização
 

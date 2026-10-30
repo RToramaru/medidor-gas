@@ -12,6 +12,7 @@ from leitor_gas.vision import (
     classify_roi,
     detect_digit_positions,
 )
+from leitor_gas.calibration_preview import render_calibration_preview
 
 
 class TensorStub:
@@ -67,6 +68,17 @@ class VisionTests(unittest.TestCase):
 
         self.assertNotIn("cv2.rectangle", source)
         self.assertNotIn("cv2.putText", source)
+
+    def test_calibration_preview_updates_roi_boxes_without_changing_source(self):
+        frame = np.zeros((100, 100, 3), dtype=np.uint8)
+        original = frame.copy()
+
+        preview = render_calibration_preview(
+            frame, [(10, 10, 40, 40)], max_size=(100, 100)
+        )
+
+        np.testing.assert_array_equal(frame, original)
+        self.assertEqual(preview.getpixel((10, 10)), (57, 255, 145))
 
     def test_tensor_preparation_resizes_and_returns_batch_dimension(self):
         model = {

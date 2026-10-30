@@ -32,12 +32,12 @@ from leitor_gas.settings import (
     TEXT,
 )
 from leitor_gas.persistence import (
-    append_reading,
     load_calibration,
     migrate_legacy_results,
     save_calibration,
     update_calibration_regions,
 )
+from leitor_gas.calibration_preview import render_calibration_preview
 from leitor_gas.cameras import find_cameras
 from leitor_gas.vision import classify_roi, detect_digit_positions, load_classifier
 
@@ -70,7 +70,6 @@ class MeterCard(ctk.CTkFrame):
         self.closed = False
         self.frame = None
         self.calibration = None
-        self.backend = "Não calibrado"
         self.last_values = None
         self.last_reading = "—"
         self.initialized_reading = False
@@ -170,41 +169,44 @@ class MeterCard(ctk.CTkFrame):
         for column in range(2):
             actions.grid_columnconfigure(column, weight=1)
 
-        self.pause_button = ctk.CTkButton(
-            actions,
-            text="Ⅱ  Pausar",
-            height=34,
-            fg_color="#414752",
-            hover_color="#555D6B",
-            command=self.toggle_pause,
-        )
-        self.pause_button.grid(row=0, column=0, padx=3, pady=3, sticky="ew")
+        self.pause_button = None
+        self.record_button = None
         self.calibrate_button = ctk.CTkButton(
             actions,
             text="Calibrar novamente",
             height=34,
             command=self.calibrate,
         )
-        self.calibrate_button.grid(row=0, column=1, padx=3, pady=3, sticky="ew")
-        self.record_button = ctk.CTkButton(
-            actions,
-            text="Gravar vídeo",
-            height=34,
-            fg_color="#B64B35",
-            hover_color="#D45B42",
-            command=self.toggle_recording,
-        )
-        self.record_button.grid(row=1, column=0, padx=3, pady=3, sticky="ew")
-        self.save_button = ctk.CTkButton(
-            actions,
-            text="Salvar leitura",
-            height=34,
-            fg_color="#286B43",
-            hover_color="#348A57",
-            command=self.save_reading,
-            state="disabled",
-        )
-        self.save_button.grid(row=1, column=1, padx=3, pady=3, sticky="ew")
+        if self.source_type == "video":
+            self.pause_button = ctk.CTkButton(
+                actions,
+                text="Ⅱ  Pausar",
+                height=34,
+                fg_color="#414752",
+                hover_color="#555D6B",
+                command=self.toggle_pause,
+            )
+            self.pause_button.grid(row=0, column=0, padx=3, pady=3, sticky="ew")
+            self.calibrate_button.grid(
+                row=0, column=1, padx=3, pady=3, sticky="ew"
+            )
+        elif self.source_type == "camera":
+            self.record_button = ctk.CTkButton(
+                actions,
+                text="Gravar vídeo",
+                height=34,
+                fg_color="#B64B35",
+                hover_color="#D45B42",
+                command=self.toggle_recording,
+            )
+            self.record_button.grid(row=0, column=0, padx=3, pady=3, sticky="ew")
+            self.calibrate_button.grid(
+                row=0, column=1, padx=3, pady=3, sticky="ew"
+            )
+        else:
+            self.calibrate_button.grid(
+                row=0, column=0, columnspan=2, padx=3, pady=3, sticky="ew"
+            )
 
         self.reconnect_button = ctk.CTkButton(
             actions,
@@ -225,12 +227,8 @@ class MeterCard(ctk.CTkFrame):
             state="disabled",
         )
         self.edit_calibration_button.grid(
-            row=3, column=0, columnspan=2, padx=3, pady=3, sticky="ew"
+            row=1, column=0, columnspan=2, padx=3, pady=3, sticky="ew"
         )
-
-        if self.source_type == "image":
-            self.pause_button.configure(state="disabled")
-            self.record_button.configure(state="disabled")
 
     def _open_source(self):
         if self.source_type == "image":
@@ -303,7 +301,6 @@ class MeterCard(ctk.CTkFrame):
                 self.initialized_reading = False
                 self.last_reading = "—"
             self.reading_label.configure(text="—")
-            self.save_button.configure(state="disabled")
         self.reconnect_button.grid_remove()
         self._set_status("Ao vivo", color=GREEN)
         self.capture_thread = threading.Thread(target=self._capture_worker, daemon=True)
@@ -344,7 +341,6 @@ class MeterCard(ctk.CTkFrame):
             if data is None:
                 return
             self.calibration = data
-            self.backend = data.get("backend", "Calibração salva")
         except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
             self._set_status(f"Não foi possível carregar a calibração: {exc}", error=True)
 
@@ -537,14 +533,12 @@ class MeterCard(ctk.CTkFrame):
         self.calibrate_button.configure(state="normal")
         with self.analysis_lock:
             self.calibration = data
-            self.backend = data["backend"]
             self.last_values = None
             self.initialized_reading = False
             self.reading_error = False
         self.edit_calibration_button.configure(state="normal")
         self.last_reading = "—"
         self.reading_label.configure(text="—")
-        self.save_button.configure(state="disabled")
         self.edit_calibration_button.configure(state="normal")
         if self.source_type == "image" and self.frame is not None:
             self._start_image_analysis(self.frame)
@@ -583,7 +577,7 @@ class MeterCard(ctk.CTkFrame):
         x1, y1, x2, y2 = self._clip_roi(last_roi, width, height)
         if x2 <= x1 or y2 <= y1:
             self.app.schedule_latest_analysis(
-                self, frame, "—", False, "Aguardando uma leitura completa."
+                self, frame, "—", "Aguardando uma leitura completa."
             )
             return
 
@@ -637,7 +631,6 @@ class MeterCard(ctk.CTkFrame):
             self,
             frame,
             self.last_reading,
-            reading_is_complete,
             status,
         )
 
@@ -645,7 +638,6 @@ class MeterCard(ctk.CTkFrame):
         if self.closed:
             return
         self._release_writer()
-        self.save_button.configure(state="disabled")
         self._set_status("Não foi possível processar esta imagem.", error=True)
         messagebox.showerror("Erro na leitura", str(error), parent=self.app)
 
@@ -655,10 +647,12 @@ class MeterCard(ctk.CTkFrame):
 
         editor = ctk.CTkToplevel(self.app)
         editor.title("Ajustar regiões dos dígitos")
-        editor.geometry("620x520")
+        editor.geometry("1180x740")
+        editor.minsize(1000, 640)
         editor.transient(self.app)
         editor.grab_set()
-        editor.grid_columnconfigure(0, weight=1)
+        editor.grid_columnconfigure(0, weight=3)
+        editor.grid_columnconfigure(1, weight=2)
         editor.grid_rowconfigure(1, weight=1)
 
         ctk.CTkLabel(
@@ -669,10 +663,20 @@ class MeterCard(ctk.CTkFrame):
             ),
             anchor="w",
             justify="left",
-        ).grid(row=0, column=0, padx=16, pady=(16, 8), sticky="ew")
+        ).grid(row=0, column=0, columnspan=2, padx=16, pady=(16, 8), sticky="ew")
 
+        preview_label = ctk.CTkLabel(
+            editor,
+            text="Prévia indisponível",
+            fg_color="#080A0E",
+            corner_radius=9,
+            text_color=MUTED,
+        )
+        preview_label.grid(
+            row=1, column=0, padx=(16, 8), pady=8, sticky="nsew"
+        )
         table = ctk.CTkScrollableFrame(editor)
-        table.grid(row=1, column=0, padx=12, pady=8, sticky="nsew")
+        table.grid(row=1, column=1, padx=(8, 16), pady=8, sticky="nsew")
         for column, title in enumerate(("Dígito", "X inicial", "Y inicial", "X final", "Y final")):
             ctk.CTkLabel(table, text=title, font=ctk.CTkFont(weight="bold")).grid(
                 row=0, column=column, padx=4, pady=5
@@ -686,11 +690,20 @@ class MeterCard(ctk.CTkFrame):
                 entry = ctk.CTkEntry(table, width=88)
                 entry.insert(0, str(int(roi[coordinate])))
                 entry.grid(row=row, column=column, padx=4, pady=3)
+                entry.bind(
+                    "<KeyRelease>",
+                    lambda _event: self._update_calibration_preview(
+                        preview_label, preview_frame, fields
+                    ),
+                )
                 row_fields.append(entry)
             fields.append(row_fields)
 
+        preview_frame = self.frame.copy() if self.frame is not None else None
+        self._update_calibration_preview(preview_label, preview_frame, fields)
+
         buttons = ctk.CTkFrame(editor, fg_color="transparent")
-        buttons.grid(row=2, column=0, padx=12, pady=(4, 12), sticky="e")
+        buttons.grid(row=2, column=0, columnspan=2, padx=12, pady=(4, 12), sticky="e")
         ctk.CTkButton(
             buttons,
             text="Cancelar",
@@ -702,6 +715,27 @@ class MeterCard(ctk.CTkFrame):
             text="Salvar regiões",
             command=lambda: self._save_calibration_edits(fields, editor),
         ).pack(side="right", padx=4)
+
+    @staticmethod
+    def _update_calibration_preview(preview_label, frame, fields):
+        if frame is None:
+            return
+
+        regions = []
+        for row_fields in fields:
+            try:
+                regions.append(tuple(int(field.get()) for field in row_fields))
+            except ValueError:
+                regions.append(None)
+
+        image = render_calibration_preview(frame, regions)
+        image_ref = ctk.CTkImage(
+            light_image=image,
+            dark_image=image,
+            size=image.size,
+        )
+        preview_label.image_ref = image_ref
+        preview_label.configure(image=image_ref, text="")
 
     def _save_calibration_edits(self, fields: list, editor):
         try:
@@ -720,7 +754,6 @@ class MeterCard(ctk.CTkFrame):
             self.last_values = None
             self.reading_label.configure(text="—")
             self.last_reading = "—"
-            self.save_button.configure(state="disabled")
         self._set_status("Regiões salvas. Lendo novamente…")
         editor.destroy()
         if self.source_type == "image" and self.frame is not None:
@@ -730,16 +763,12 @@ class MeterCard(ctk.CTkFrame):
         self,
         frame: np.ndarray,
         reading: str,
-        reading_complete: bool,
         status: str,
     ):
         if self.closed:
             return
         self.last_reading = reading
         self.reading_label.configure(text=self.last_reading)
-        self.save_button.configure(
-            state="normal" if reading_complete else "disabled"
-        )
         self._show_frame(frame)
         self._set_status(status, color=GREEN)
 
@@ -771,7 +800,7 @@ class MeterCard(ctk.CTkFrame):
         self.preview.configure(image=self.image_ref, text="")
 
     def toggle_pause(self):
-        if self.source_type == "image":
+        if self.source_type != "video" or self.pause_button is None:
             return
 
         self.paused = not self.paused
@@ -782,6 +811,8 @@ class MeterCard(ctk.CTkFrame):
         )
 
     def toggle_recording(self):
+        if self.source_type != "camera" or self.record_button is None:
+            return
         if self.recording:
             self._release_writer()
             self.info_label.configure(text="Gravação salva.")
@@ -828,32 +859,8 @@ class MeterCard(ctk.CTkFrame):
                 self.writer.release()
                 self.writer = None
             self.recording = False
-        if not self.closed:
+        if not self.closed and self.record_button is not None:
             self.record_button.configure(text="Gravar vídeo", fg_color="#B64B35")
-
-    def save_reading(self):
-        if self.last_reading == "—":
-            return
-
-        try:
-            output_path = RESULTS_DIR / "leituras.csv"
-            append_reading(
-                output_path,
-                [
-                    datetime.now().isoformat(timespec="seconds"),
-                    self.title_text,
-                    self.last_reading,
-                    self.backend,
-                    len(self.calibration["rois"]),
-                ],
-            )
-        except OSError as exc:
-            messagebox.showerror(
-                "Erro ao salvar leitura", str(exc), parent=self.app
-            )
-            return
-
-        self.info_label.configure(text="Leitura salva no histórico.")
 
     def close(self):
         if self.closed:
@@ -1050,15 +1057,14 @@ class HydrometerApp(ctk.CTk):
         card: MeterCard,
         frame: np.ndarray,
         reading: str,
-        reading_complete: bool,
         status: str,
     ):
         key = ("analysis", card.card_id)
         self._schedule_coalesced(
             key,
             lambda image=frame, value=reading,
-            is_complete=reading_complete, message=status: card._render_analysis(
-                image, value, is_complete, message
+            message=status: card._render_analysis(
+                image, value, message
             ),
         )
 

@@ -1,4 +1,3 @@
-import csv
 import json
 import tempfile
 import unittest
@@ -70,27 +69,6 @@ class PersistenceTests(unittest.TestCase):
             persistence.update_calibration_regions(
                 calibration, [(10, 5, 101, 25)]
             )
-
-    def test_append_reading_writes_header_once(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "readings.csv"
-            persistence.append_reading(path, ["2026-10-30", "camera", "123.4", "CPU", 4])
-            persistence.append_reading(path, ["2026-10-31", "camera", "123.5", "CPU", 4])
-
-            with path.open(encoding="utf-8-sig", newline="") as file:
-                rows = list(csv.reader(file, delimiter=";"))
-
-        self.assertEqual(rows[0], ["data_hora", "fonte", "leitura", "backend", "rois"])
-        self.assertEqual(len(rows), 3)
-        self.assertEqual(rows[2][2], "123.5")
-
-    def test_append_reading_reports_filesystem_errors(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "not-a-file"
-            path.mkdir()
-
-            with self.assertRaises(OSError):
-                persistence.append_reading(path, ["row"])
 
     def test_legacy_migration_preserves_source_and_does_not_overwrite(self):
         with tempfile.TemporaryDirectory() as directory:

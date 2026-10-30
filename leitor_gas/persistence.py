@@ -1,4 +1,3 @@
-import csv
 import json
 import shutil
 from pathlib import Path
@@ -57,16 +56,6 @@ def update_calibration_regions(data: dict, coordinates: list[tuple[int, int, int
     result = dict(data)
     result["rois"] = sorted(rois, key=lambda roi: (roi["x1"] + roi["x2"]) / 2)
     return result
-
-
-def append_reading(path: Path, row: list):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    is_new_file = not path.exists()
-    with path.open("a", newline="", encoding="utf-8-sig") as file:
-        writer = csv.writer(file, delimiter=";")
-        if is_new_file:
-            writer.writerow(["data_hora", "fonte", "leitura", "backend", "rois"])
-        writer.writerow(row)
 
 
 def migrate_legacy_results() -> str | None:

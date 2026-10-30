@@ -5,11 +5,12 @@ Aplicativo desktop para ler hidrômetros a partir de imagens, vídeos e câmera.
 ## Recursos
 
 - Detecta e reconhece os dígitos do visor.
-- Salva leituras em CSV e grava vídeos em MP4.
+- Grava a imagem da câmera em MP4 quando solicitado.
 - Reutiliza a calibração da fonte quando ela já existe.
-- Mostra somente a imagem original: nenhum desenho, caixa ou rótulo é sobreposto.
-- Exibe e permite salvar a leitura assim que todos os dígitos forem reconhecidos.
+- Mantém a imagem principal original, sem sobreposições.
+- Exibe a leitura assim que todos os dígitos forem reconhecidos.
 - Permite selecionar e reconectar câmeras e ajustar regiões com coordenadas.
+- Mostra os quadros das regiões na prévia do editor e atualiza-os ao alterar as coordenadas.
 - Processa imagens, vídeos e câmera em segundo plano para manter a interface responsiva.
 
 O programa usa detecção YOLO para encontrar os dígitos e classificadores TFLite para ler os valores. A aceleração por GPU é opcional; também é possível executar em CPU.
@@ -72,8 +73,8 @@ python main.py
 1. Aguarde o carregamento inicial.
 2. Selecione uma imagem, vídeo ou câmera no menu lateral.
 3. Aguarde a leitura inicial. O valor aparece assim que todos os dígitos forem reconhecidos.
-4. Se necessário, clique em **Calibrar novamente** ou em **Ajustar regiões**. O ajuste é feito com coordenadas numéricas, sem desenhar na imagem.
-5. Em vídeo e câmera, use **Pausar** e **Gravar vídeo**. **Salvar leitura** fica disponível quando a leitura está completa.
+4. Se necessário, clique em **Calibrar novamente** ou em **Ajustar regiões**. A prévia do editor destaca as regiões conforme você altera as coordenadas; a imagem principal continua sem desenhos.
+5. Em vídeos, use **Pausar**. Em câmeras, use **Gravar vídeo** se precisar salvar a captura.
 
 Imagens são analisadas uma vez. A leitura é uma estimativa e deve ser conferida antes de ser usada como registro oficial. Caso uma câmera ou vídeo continue aberto após um erro de leitura, tente calibrar novamente.
 
@@ -85,7 +86,7 @@ Os resultados ficam na pasta de dados do usuário:
 - macOS: `~/Library/Application Support/LeitorGas/resultados`
 - Linux: `$XDG_DATA_HOME/leitor-gas/resultados` ou `~/.local/share/leitor-gas/resultados`
 
-Essa pasta contém `leituras.csv`, `calibracoes/` e os vídeos gravados. Na primeira execução, calibrações e CSV existentes em `resultados/` na pasta do projeto são copiados para o novo local sem remover os originais. Mantenha os modelos incluídos junto ao programa.
+Essa pasta contém `calibracoes/` e os vídeos gravados da câmera. Arquivos CSV antigos existentes em `resultados/` na pasta do projeto são copiados para o novo local, sem remover os originais; o aplicativo não cria novas entradas de leitura. Mantenha os modelos incluídos junto ao programa.
 
 ## Criar um aplicativo distribuível
 
@@ -106,6 +107,7 @@ leitor-ocr-gas/
 ├── leitor_gas/
 │   ├── application.py
 │   ├── cameras.py
+│   ├── calibration_preview.py
 │   ├── persistence.py
 │   ├── settings.py
 │   └── vision.py
@@ -118,7 +120,7 @@ leitor-ocr-gas/
 
 - `main.py` inicia o aplicativo.
 - `leitor_gas/application.py` contém a interface e o ciclo de vida de imagens, vídeos e câmera.
-- `leitor_gas/cameras.py` e `persistence.py` cuidam da busca de câmeras e do armazenamento.
+- `leitor_gas/cameras.py`, `calibration_preview.py` e `persistence.py` cuidam da busca de câmeras, da prévia do ajuste e do armazenamento de calibrações.
 - `leitor_gas/vision.py` contém a detecção e a classificação dos dígitos.
 - `leitor_gas/settings.py` centraliza caminhos, parâmetros e cores.
 - `build.py` cria o pacote distribuível para o sistema atual.

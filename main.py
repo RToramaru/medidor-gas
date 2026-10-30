@@ -1,6 +1,3 @@
-import os
-os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
-
 import csv
 import json
 import hashlib
@@ -42,9 +39,7 @@ ctk.set_default_color_theme("blue")
 # Paleta próxima ao painel escuro do projeto
 BG = "#111318"
 PANEL = "#1A1D24"
-PANEL_ALT = "#20242D"
 BORDER = "#303641"
-BLUE = "#1976D2"
 GREEN = "#36C275"
 RED = "#E05252"
 TEXT = "#F2F4F8"
@@ -241,7 +236,6 @@ class MeterCard(ctk.CTkFrame):
         self.backend = "Não calibrado"
         self.last_values = None
         self.last_reading = "—"
-        self.last_frame_time = 0
         self.initialized_reading = False
         self.calibrating = False
         self.writer = None
@@ -321,7 +315,7 @@ class MeterCard(ctk.CTkFrame):
         try:
             self.calibration = json.loads(self.calibration_file.read_text(encoding="utf-8"))
             self.backend = self.calibration.get("backend", "Calibração salva")
-            self.info_label.configure(text=f"Calibração carregada · {len(self.calibration['rois'])} ROIs · {self.backend}")
+            self.info_label.configure(text="Calibração pronta. Iniciando leitura…")
         except Exception as exc:
             self.calibration = None
             self.info_label.configure(text=f"Falha ao carregar calibração: {exc}")
@@ -361,8 +355,10 @@ class MeterCard(ctk.CTkFrame):
         if self.recording and self.writer is not None:
             try:
                 self.writer.write(frame)
-            except Exception:
-                pass
+            except Exception as exc:
+                self._release_writer()
+                self.info_label.configure(text="Gravação interrompida.")
+                messagebox.showerror("Erro ao gravar", str(exc))
         self.after(INTERVALO_VIDEO_MS, self._next_frame)
 
     def _compatible(self, frame):
@@ -378,7 +374,7 @@ class MeterCard(ctk.CTkFrame):
         if getattr(self, "calibrating", False):
             return
         self.calibrating = True
-        self.info_label.configure(text="Executando YOLO para localizar os dígitos…")
+        self.info_label.configure(text="Localizando os dígitos…")
         frame = self.frame.copy()
         threading.Thread(target=self._calibrate_worker, args=(frame,), daemon=True).start()
 
@@ -409,7 +405,7 @@ class MeterCard(ctk.CTkFrame):
             return
         self.calibration = data
         self.backend = backend
-        self.info_label.configure(text=f"Calibrado · {len(data['rois'])} dígitos · {backend}")
+        self.info_label.configure(text="Calibração concluída.")
         if self.frame is not None:
             self.last_values = None
             self.initialized_reading = False
@@ -457,12 +453,7 @@ class MeterCard(ctk.CTkFrame):
                 classe, score = classificar_roi(frame[b:d, a:c], self.app.model11)
                 value = None if classe == 10 else classe
                 self.last_values[i] = {"kind": "11", "class": classe, "value": value, "score": score}
-        elif initialize:
-            # Não força a classificação dos anteriores fora da janela de virada.
-            pass
-
         annotated = frame.copy()
-        labels = []
         for i, box in enumerate(rois):
             a, b, c, d = self._clip_roi(box, w, h)
             item = self.last_values[i]
@@ -481,7 +472,6 @@ class MeterCard(ctk.CTkFrame):
             cv2.rectangle(annotated, (a, b), (c, d), color, 2)
             cv2.putText(annotated, label, (a, max(20, b - 7)), cv2.FONT_HERSHEY_SIMPLEX,
                         0.65, color, 2, cv2.LINE_AA)
-            labels.append(label)
 
         # Só monta a leitura completa se todos os dígitos anteriores já foram reconhecidos.
         if all(v is not None and v["value"] is not None for v in self.last_values):
@@ -499,7 +489,7 @@ class MeterCard(ctk.CTkFrame):
             extra = "Último dígito entre 0.0 e 0.9: dígitos anteriores atualizados."
         else:
             extra = "Último dígito atualizado; dígitos anteriores mantidos."
-        self.info_label.configure(text=f"{len(rois)} ROIs · {self.backend}\n{extra}")
+        self.info_label.configure(text=extra)
 
     @staticmethod
     def _clip_roi(box, w, h):
@@ -599,7 +589,6 @@ class HidrometroApp(ctk.CTk):
         self.next_id = 1
         self.model11 = None
         self.model100 = None
-        self.model_error = None
         self._build_ui()
         self.after(150, self._load_models)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -613,7 +602,7 @@ class HidrometroApp(ctk.CTk):
         sidebar.grid_propagate(False)
         ctk.CTkLabel(sidebar, text="◉  HIDROMETRO", font=ctk.CTkFont(size=20, weight="bold"),
                      text_color=TEXT).pack(anchor="w", padx=18, pady=(25, 4))
-        ctk.CTkLabel(sidebar, text="MONITORAMENTO LOCAL", font=ctk.CTkFont(size=10, weight="bold"),
+        ctk.CTkLabel(sidebar, text="LEITURA DE HIDRÔMETROS", font=ctk.CTkFont(size=10, weight="bold"),
                      text_color=MUTED).pack(anchor="w", padx=20, pady=(0, 24))
         ctk.CTkLabel(sidebar, text="FONTES", font=ctk.CTkFont(size=11, weight="bold"),
                      text_color=MUTED).pack(anchor="w", padx=18, pady=(4, 8))
@@ -623,25 +612,18 @@ class HidrometroApp(ctk.CTk):
         ctk.CTkButton(sidebar, text="◉  Câmera local", anchor="w", fg_color="#303641", hover_color="#414957",
                       command=self.add_camera).pack(fill="x", padx=12, pady=4)
         ctk.CTkFrame(sidebar, height=1, fg_color=BORDER).pack(fill="x", padx=14, pady=18)
-        ctk.CTkLabel(sidebar, text="MODELOS", font=ctk.CTkFont(size=11, weight="bold"),
+        ctk.CTkLabel(sidebar, text="STATUS", font=ctk.CTkFont(size=11, weight="bold"),
                      text_color=MUTED).pack(anchor="w", padx=18, pady=(0, 8))
-        self.model_status = ctk.CTkLabel(sidebar, text="Carregando modelos…", justify="left", anchor="w",
-                                         wraplength=185, text_color=MUTED)
-        self.model_status.pack(fill="x", padx=18)
-        ctk.CTkFrame(sidebar, height=1, fg_color=BORDER).pack(fill="x", padx=14, pady=18)
-        ctk.CTkLabel(sidebar, text="PROCESSAMENTO", font=ctk.CTkFont(size=11, weight="bold"),
-                     text_color=MUTED).pack(anchor="w", padx=18, pady=(0, 8))
-        ctk.CTkLabel(sidebar, text="• Sem API\n• Inferência local\n• YOLO na calibração\n• TFLite nos frames",
-                     justify="left", anchor="w", text_color="#C3CAD5", font=ctk.CTkFont(size=12)).pack(fill="x", padx=18)
-        ctk.CTkLabel(sidebar, text="hidrometro-openvino\ninterface desktop", text_color="#687384",
-                     font=ctk.CTkFont(size=10), justify="left").pack(side="bottom", anchor="w", padx=18, pady=20)
+        self.app_status = ctk.CTkLabel(sidebar, text="Preparando…", justify="left", anchor="w",
+                                       wraplength=185, text_color=MUTED)
+        self.app_status.pack(fill="x", padx=18)
 
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.grid(row=0, column=1, sticky="ew", padx=22, pady=(20, 8))
         header.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(header, text="Painel de monitoramento", font=ctk.CTkFont(size=25, weight="bold"),
                      text_color=TEXT).grid(row=0, column=0, sticky="w")
-        ctk.CTkLabel(header, text="Detecção de posições + classificação dos dígitos",
+        ctk.CTkLabel(header, text="Acompanhe a leitura em imagens, vídeos e câmera",
                      text_color=MUTED).grid(row=1, column=0, sticky="w", pady=(3, 0))
         self.counter_label = ctk.CTkLabel(header, text="0 fontes ativas", text_color="#9BC6FF",
                                           fg_color="#1D2A3B", corner_radius=8)
@@ -657,20 +639,19 @@ class HidrometroApp(ctk.CTk):
 
         footer = ctk.CTkFrame(self, height=28, corner_radius=0, fg_color="#171A20")
         footer.grid(row=2, column=0, columnspan=2, sticky="ew")
-        self.footer_status = ctk.CTkLabel(footer, text="Pronto · modo local", text_color=MUTED, anchor="w")
+        self.footer_status = ctk.CTkLabel(footer, text="Preparando o aplicativo…", text_color=MUTED, anchor="w")
         self.footer_status.pack(fill="x", padx=12, pady=5)
 
     def _load_models(self):
         try:
-            self.footer_status.configure(text="Carregando classificadores TFLite…")
+            self.footer_status.configure(text="Preparando leitura…")
             self.model11 = carregar_tflite(CLASS11_PATH, 11)
             self.model100 = carregar_tflite(CLASS100_PATH, 100)
-            self.model_status.configure(text="✓ class11 carregado\n✓ class100 carregado", text_color=GREEN)
-            self.footer_status.configure(text="Modelos TFLite carregados. Calibração automática na primeira abertura; YOLO só roda novamente ao clicar em Calibrar.")
+            self.app_status.configure(text="Pronto para leitura", text_color=GREEN)
+            self.footer_status.configure(text="Aplicativo pronto. Abra uma fonte para começar.")
         except Exception as exc:
-            self.model_error = str(exc)
-            self.model_status.configure(text="Erro ao carregar modelos", text_color=RED)
-            self.footer_status.configure(text=f"Erro nos modelos: {exc}")
+            self.app_status.configure(text="Não foi possível iniciar", text_color=RED)
+            self.footer_status.configure(text="Falha ao iniciar. Consulte os detalhes do aviso.")
             messagebox.showerror("Erro ao carregar modelos", str(exc))
 
     def _add_card(self, source, source_type, title):
@@ -698,7 +679,7 @@ class HidrometroApp(ctk.CTk):
             self._add_card(path, "image", Path(path).name)
 
     def add_camera(self):
-        self._add_card(0, "camera", "Câmera local 0")
+        self._add_card(0, "camera", "Câmera local")
 
     def remove_card(self, card):
         if card in self.cards:
